@@ -9,6 +9,10 @@ __pycache__/
 env/
 venv/
 
+# audio
+*.wav
+*.mp3
+
 # macOS
 .DS_Store
 

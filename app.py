@@ -1,15 +1,13 @@
-"""
-app.py — Stable Edit-Then-Run + Code Export
-- Session-safe Run button (survives rerun)
-- Safe API key loader (.env/env, then st.secrets)
-- Logging to outputs/app.log
-- Prompt builder → editor → run
-- Optional critic/self-review + error-driven fix
-- JSON validation
-- NEW: Detect code blocks in output, save as scripts, and provide downloads (and zip if multiple)
-"""
 from __future__ import annotations
-
+from datetime import datetime, timezone
+from typing import List, Dict, Optional, Callable, Tuple
+from dotenv import load_dotenv
+from openai import OpenAI
+# Removed eager audio imports to prevent errors when packages absent
+# from audio_recorder_streamlit import audio_recorder  # NEW 🎤
+# from streamlit_mic_recorder import mic_recorder
+from base64 import b64decode
+import hashlib  # ADDED: for deduping audio saves
 import os
 import re
 import io
@@ -18,12 +16,8 @@ import time
 import uuid
 import zipfile
 import logging
-from datetime import datetime, timezone
-from typing import List, Dict, Optional, Callable, Tuple
-
-import streamlit as st
-from dotenv import load_dotenv
-from openai import OpenAI
+import streamlit as st  # ADDED
+import streamlit.components.v1 as components  # ADDED
 
 # ================================================================
 # Page / Logging / Outputs
@@ -54,7 +48,7 @@ if not api_key:
 
 if not api_key:
     st.error("Missing OPENAI_API_KEY. Set it in your environment, .env, or .streamlit/secrets.toml")
-    st.stop()
+    st.stop()  # FIX: keep stop inside conditional
 
 client = OpenAI(api_key=api_key)
 
@@ -81,13 +75,23 @@ Follow these standards when generating an engineered prompt:
 # Session State
 # ================================================================
 if "chat" not in st.session_state:
-    st.session_state.chat: List[Dict[str, str]] = []
+    st.session_state.chat = []  # removed inline type comment to satisfy linter
 if "engineered_prompt" not in st.session_state:
     st.session_state.engineered_prompt = ""
 if "last_run_meta" not in st.session_state:
     st.session_state.last_run_meta = {}
 if "run_requested" not in st.session_state:
-    st.session_state.run_requested = False  # gate to run on rerun
+    st.session_state.run_requested = False
+# NEW: voice → text pipeline
+if "pending_instruction" not in st.session_state:
+    st.session_state.pending_instruction = ""   # set from mic transcript when user clicks “Use...”
+if "voice_transcript" not in st.session_state:
+    st.session_state.voice_transcript = ""      # last transcribed text
+# NEW: audio dedupe caches
+if "saved_audio_hashes" not in st.session_state:
+    st.session_state.saved_audio_hashes = {}  # sha256 -> path
+if "last_composer_audio_hash" not in st.session_state:
+    st.session_state.last_composer_audio_hash = None
 
 # ================================================================
 # Sidebar Controls
@@ -161,6 +165,26 @@ def save_text(text: str, prefix: str) -> str:
     logger.info("Saved %s (%d bytes)", path, len(text))
     return path
 
+def save_bytes(b: bytes, prefix: str, ext: str) -> str:
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    fname = f"{prefix}-{ts}-{uuid.uuid4().hex[:8]}.{ext}"
+    path = os.path.join(OUTPUT_DIR, fname)
+    with open(path, "wb") as f:
+        f.write(b)
+    logger.info("Saved %s (%d bytes)", path, len(b))
+    return path
+
+# ADDED: helper to avoid saving same audio multiple times per Streamlit reruns
+def save_audio_once(audio_bytes: bytes, *, prefix: str = "voice", ext: str = "wav") -> str:
+    h = hashlib.sha256(audio_bytes).hexdigest()[:32]
+    existing = st.session_state.saved_audio_hashes.get(h)
+    if existing:
+        logger.debug("Audio already saved (hash=%s) -> %s", h, existing)
+        return existing
+    path = save_bytes(audio_bytes, prefix=prefix, ext=ext)
+    st.session_state.saved_audio_hashes[h] = path
+    logger.info("Audio saved once (hash=%s) -> %s", h, path)
+    return path
 
 def retry(fn: Callable[[], str], *, retries: int = 2, base_delay: float = 0.8) -> str:
     last_err: Optional[Exception] = None
@@ -173,7 +197,6 @@ def retry(fn: Callable[[], str], *, retries: int = 2, base_delay: float = 0.8) -
             logger.warning("Attempt %d failed: %s (waiting %.2fs)", attempt + 1, e, wait)
             time.sleep(wait)
     raise RuntimeError(f"All retries failed: {last_err}")
-
 
 def validate_json_output(text: str) -> Optional[str]:
     looks_json = output_format.upper() == "JSON" or text.strip().startswith(("{", "["))
@@ -221,7 +244,6 @@ def _call_via_responses(sys: str, user: str, stream: bool) -> str:
                     chunks.append(getattr(c, "text", ""))
     return "".join(chunks).strip()
 
-
 def _call_via_chat(sys: str, user: str, stream: bool) -> str:
     resp = client.chat.completions.create(
         model=model,
@@ -229,7 +251,6 @@ def _call_via_chat(sys: str, user: str, stream: bool) -> str:
         stream=False,
     )
     return resp.choices[0].message.content.strip()
-
 
 def llm_once(sys: str, user: str, *, stream: bool) -> str:
     text = user.strip()
@@ -260,7 +281,6 @@ def build_engineered_prompt(user_instruction: str) -> str:
     )
     return llm_once(PROMPT_BUILDER_SYSTEM, builder_user, stream=False)
 
-
 def execute_engineered_prompt(engineered_prompt: str, history: Optional[List[Dict[str, str]]] = None) -> str:
     if conversation_mode and history:
         recent = history[-6:]
@@ -274,7 +294,6 @@ def execute_engineered_prompt(engineered_prompt: str, history: Optional[List[Dic
         return llm_once(EXECUTOR_SYSTEM, engineered_with_context, stream=stream_tokens)
     return llm_once(EXECUTOR_SYSTEM, engineered_prompt, stream=stream_tokens)
 
-
 def run_code_self_review(original_instruction: str, assistant_output: str) -> str:
     critic_input = (
         "[Original Instruction]\n"
@@ -283,7 +302,6 @@ def run_code_self_review(original_instruction: str, assistant_output: str) -> st
         + assistant_output.strip()
     )
     return llm_once(CODE_CRITIC_SYSTEM, critic_input, stream=False)
-
 
 def run_error_driven_fix(original_instruction: str, previous_answer: str, error_text: str) -> str:
     fix_input = (
@@ -300,52 +318,17 @@ def run_error_driven_fix(original_instruction: str, previous_answer: str, error_
 # NEW — Code block extraction + downloads
 # ================================================================
 LANG_EXT = {
-    "python": "py",
-    "py": "py",
-    "bash": "sh",
-    "sh": "sh",
-    "shell": "sh",
-    "zsh": "sh",
-    "powershell": "ps1",
-    "ps1": "ps1",
-    "javascript": "js",
-    "js": "js",
-    "typescript": "ts",
-    "ts": "ts",
-    "json": "json",
-    "yaml": "yaml",
-    "yml": "yml",
-    "toml": "toml",
-    "sql": "sql",
-    "html": "html",
-    "css": "css",
-    "java": "java",
-    "c": "c",
-    "cpp": "cpp",
-    "c++": "cpp",
-    "rust": "rs",
-    "go": "go",
-    "rb": "rb",
-    "ruby": "rb",
-    "php": "php",
-    "kotlin": "kt",
-    "scala": "scala",
-    "r": "r",
-    "md": "md",
-    "markdown": "md",
-    "text": "txt",
+    "python": "py","py": "py","bash": "sh","sh": "sh","shell": "sh","zsh": "sh",
+    "powershell": "ps1","ps1": "ps1","javascript": "js","js": "js",
+    "typescript": "ts","ts": "ts","json": "json","yaml": "yaml","yml": "yml",
+    "toml": "toml","sql": "sql","html": "html","css": "css","java": "java",
+    "c": "c","cpp": "cpp","c++": "cpp","rust": "rs","go": "go","rb": "rb",
+    "ruby": "rb","php": "php","kotlin": "kt","scala": "scala","r": "r",
+    "md": "md","markdown": "md","text": "txt",
 }
-
-CODE_BLOCK_RE = re.compile(
-    r"```([A-Za-z0-9_+-]*)\s*\n(.*?)```",
-    re.DOTALL,
-)
+CODE_BLOCK_RE = re.compile(r"```([A-Za-z0-9_+-]*)\s*\n(.*?)```", re.DOTALL)
 
 def extract_code_blocks(text: str) -> List[Tuple[str, str]]:
-    """
-    Return list of (language, code) for each fenced block found.
-    If no language is given, language == ''.
-    """
     blocks: List[Tuple[str, str]] = []
     for m in CODE_BLOCK_RE.finditer(text):
         lang = (m.group(1) or "").strip().lower()
@@ -354,10 +337,6 @@ def extract_code_blocks(text: str) -> List[Tuple[str, str]]:
     return blocks
 
 def save_code_blocks(blocks: List[Tuple[str, str]], base_name: str) -> List[Tuple[str, str, str]]:
-    """
-    Save code blocks to files under outputs/.
-    Returns list of tuples: (language, filename, path)
-    """
     saved: List[Tuple[str, str, str]] = []
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     for idx, (lang, code) in enumerate(blocks, start=1):
@@ -370,41 +349,201 @@ def save_code_blocks(blocks: List[Tuple[str, str]], base_name: str) -> List[Tupl
         logger.info("Saved code block: %s (%s)", path, lang or "plain")
     return saved
 
-def offer_code_downloads(text: str, base_name: str = "codeblock") -> None:
+def offer_code_downloads(text: str, base_name: str = "script") -> None:
     """
-    Detect code blocks in text, save them, and show download buttons.
-    If multiple blocks, also offer a zip of all.
+    Detect code blocks and show download buttons without writing to disk.
+    Only when the user clicks a button do we (optionally) persist to outputs/.
     """
     blocks = extract_code_blocks(text)
     if not blocks:
         return
 
     st.markdown("#### Detected code block(s)")
-    saved = save_code_blocks(blocks, base_name=base_name)
 
-    # Per-file download buttons
-    for lang, filename, path in saved:
-        with open(path, "rb") as f:
-            st.download_button(
-                f"⬇️ Download {filename}",
-                data=f.read(),
-                file_name=filename,
-                key=f"dl-{filename}",
-            )
+    # Build suggested filenames (no disk writes yet)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    suggested = []
+    for idx, (lang, code) in enumerate(blocks, start=1):
+        ext = LANG_EXT.get((lang or "").lower(), "txt")
+        fname = f"{base_name}-{ts}-{idx}.{ext}"
+        suggested.append((lang or "plain", code, fname))
 
-    # Zip if multiple
-    if len(saved) > 1:
-        zip_buf = io.BytesIO()
-        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            for _, filename, path in saved:
-                zf.write(path, arcname=filename)
-        zip_buf.seek(0)
-        st.download_button(
-            "⬇️ Download all as ZIP",
-            data=zip_buf.read(),
+    # Per-file download buttons (in-memory)
+    for idx, (lang, code, fname) in enumerate(suggested, start=1):
+        clicked = st.download_button(
+            label=f"⬇️ Download {fname}",
+            data=code.encode("utf-8"),
+            file_name=fname,
+            key=f"dl-{fname}",
+        )
+        if clicked:
+            # Persist because the user explicitly downloaded
+            try:
+                path = os.path.join(OUTPUT_DIR, fname)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(code)
+                logger.info("Saved code file after download click: %s", path)
+            except Exception as e:
+                logger.exception("Failed to persist %s after download: %s", fname, e)
+
+    # ZIP (in-memory)
+    if len(suggested) > 1:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for _, code, fname in suggested:
+                zf.writestr(fname, code)
+        buf.seek(0)
+        clicked_zip = st.download_button(
+            label="⬇️ Download all as ZIP",
+            data=buf.getvalue(),
             file_name=f"{base_name}.zip",
             key="dl-zip-all",
         )
+        if clicked_zip:
+            # Optional: persist the zip after click
+            try:
+                zip_path = os.path.join(OUTPUT_DIR, f"{base_name}-{ts}.zip")
+                with open(zip_path, "wb") as f:
+                    f.write(buf.getvalue())
+                logger.info("Saved ZIP after download click: %s", zip_path)
+            except Exception as e:
+                logger.exception("Failed to persist ZIP after download: %s", e)
+# ================================================================
+# NEW — Microphone → Transcription → Instruction
+# ================================================================
+def transcribe_wav_file(path: str) -> str:
+    """
+    Send a WAV file to OpenAI transcription and return text.
+    Uses whisper-1 for broad compatibility.
+    """
+    try:
+        with open(path, "rb") as f:
+            tr = client.audio.transcriptions.create(model="whisper-1", file=f)
+        text = getattr(tr, "text", "").strip()
+        return text
+    except Exception as e:
+        logger.exception("Transcription failed: %s", e)
+        raise
+
+# Try both mic components; we'll use whichever works in the user’s browser
+# Try both recorders; we’ll use whichever works
+try:
+    from audio_recorder_streamlit import audio_recorder
+    HAS_ARS = True
+except Exception:
+    HAS_ARS = False
+
+try:
+    from streamlit_mic_recorder import mic_recorder
+    HAS_SMR = True
+except Exception:
+    HAS_SMR = False
+
+def b64_wav_to_bytes(b64_or_dict):
+    if isinstance(b64_or_dict, dict):
+        b64_data = b64_or_dict.get("bytes") or b64_or_dict.get("audio")
+    else:
+        b64_data = b64_or_dict
+    if not b64_data:
+        return None
+    if isinstance(b64_data, str) and "," in b64_data:
+        b64_data = b64_data.split(",", 1)[1]
+    return b64decode(b64_data)
+
+with st.expander("🎤 Voice to instruction (optional)", expanded=False):
+    st.caption("Record your voice or upload an audio file; we’ll transcribe it and you can use it as your instruction.")
+
+    # --- Mini diagnostics (runs in the browser) ---
+    with st.popover("Mic diagnostics"):
+        st.write("Checks your browser permission state for microphone.")
+        components.html(
+            """
+            <script>
+            async function run() {
+              const out = { https: location.protocol === 'https:' || location.hostname === 'localhost' };
+              try {
+                const perm = await navigator.permissions.query({name:'microphone'});
+                out.permission = perm.state;
+              } catch(e) { out.permission = 'unsupported (' + e + ')'; }
+              try {
+                out.mediaDevices = !!navigator.mediaDevices;
+              } catch(e) { out.mediaDevices = false; }
+              const pre = document.createElement('pre');
+              pre.textContent = JSON.stringify(out, null, 2);
+              document.body.appendChild(pre);
+            }
+            run();
+            </script>
+            """,
+            height=120,
+        )
+
+    audio_bytes = None
+    source_used = None
+
+    # --- Primary recorder
+    if HAS_ARS:
+        try:
+            audio_bytes = audio_recorder(
+                text="Click to record / stop",
+                recording_color="#e8f0fe",
+                neutral_color="#f0f0f0",
+                icon_size="2x",
+                pause_threshold=1.2,
+                sample_rate=16000,
+            )
+            if audio_bytes:
+                source_used = "audio-recorder-streamlit"
+        except Exception as e:
+            logger.warning("audio-recorder-streamlit render error: %s", e)
+
+    # --- Fallback recorder
+    if not audio_bytes and HAS_SMR:
+        try:
+            rec = mic_recorder(
+                start_prompt="Start recording",
+                stop_prompt="Stop",
+                just_once=False,
+                use_container_width=True,
+                format="wav",
+                key="mic_fallback",
+            )
+            if rec:
+                audio_bytes = b64_wav_to_bytes(rec)
+                if audio_bytes:
+                    source_used = "streamlit-mic-recorder"
+        except Exception as e:
+            logger.warning("streamlit-mic-recorder render error: %s", e)
+
+    st.caption(f"Recorder status: {'OK ('+source_used+')' if audio_bytes else 'no audio captured yet'}")
+
+    # --- NEW: Upload fallback (works everywhere)
+    up = st.file_uploader("Or upload audio (wav, m4a, mp3)", type=["wav", "m4a", "mp3"])
+    if up is not None and not audio_bytes:
+        audio_bytes = up.read()
+        source_used = f"upload:{up.type or up.name}"
+
+    if audio_bytes:
+        ext = "wav"
+        if source_used and "mp3" in source_used: ext = "mp3"
+        if source_used and "m4a" in source_used: ext = "m4a"
+        # CHANGED: use save_audio_once instead of save_bytes (dedupe)
+        wav_path = save_audio_once(audio_bytes, prefix="voice", ext=ext)
+        st.audio(audio_bytes, format=f"audio/{ext}")
+        if st.button("📝 Transcribe", key="btn_transcribe"):
+            with st.spinner("Transcribing…"):
+                try:
+                    t = transcribe_wav_file(wav_path)  # your existing function
+                    st.session_state.voice_transcript = t
+                    st.success("Transcription complete.")
+                except Exception as e:
+                    st.error(f"Transcription failed: {e}")
+
+    if st.session_state.voice_transcript:
+        st.text_area("Transcript", value=st.session_state.voice_transcript, height=120, key="voice_transcript_area")
+        if st.button("➡️ Use this as my instruction", key="btn_use_transcript"):
+            st.session_state.pending_instruction = st.session_state.voice_transcript
+            st.success("Transcript queued as your next instruction.")
 
 # ================================================================
 # UI — Header & History
@@ -421,11 +560,80 @@ for msg in st.session_state.chat:
         st.markdown(msg["content"])
 
 # ================================================================
-# Input row: instruction → Generate prompt
+# Input row: chat input OR pending instruction from voice
 # ================================================================
-user_text = st.chat_input(
-    placeholder="Describe what you want (e.g., 'generate test cases', 'draft an email', 'design a schema')."
-)
+# --- Single-mic ChatGPT-style composer (one mic on the left) ---
+
+# Ensure these helpers/imports exist near top of file:
+# from audio_recorder_streamlit import audio_recorder
+# def save_bytes(...):  # already in your file
+# def transcribe_wav_file(path: str) -> str:  # already in your file
+
+if "compose_text" not in st.session_state:
+    st.session_state.compose_text = ""
+
+def _send_compose():
+    txt = st.session_state.get("compose_text", "").strip()
+    if txt:
+        st.session_state["__pending_user_text"] = txt
+        st.session_state.compose_text = ""  # clear after send
+
+composer = st.container()
+with composer:
+    # One clean row: [ mic ] [ text input ] [ send ]
+    col_mic, col_text, col_send = st.columns([0.08, 0.74, 0.18], vertical_alignment="center")
+
+    # ---- Single mic button (audio-recorder-streamlit only)
+    with col_mic:
+        try:
+            ar_bytes = audio_recorder(
+                text="",                    # no caption next to icon
+                recording_color="#334155",  # darker while recording
+                neutral_color="#1f2937",    # dark idle
+                icon_size="1x",
+                pause_threshold=1.1,
+                sample_rate=16000,
+                key="composer_ars_single",
+            )
+            if ar_bytes:
+                h = hashlib.sha256(ar_bytes).hexdigest()[:32]
+                if h != st.session_state.last_composer_audio_hash:
+                    wav_path = save_audio_once(ar_bytes, prefix="voice", ext="wav")
+                    with st.spinner("Transcribing…"):
+                        try:
+                            t = transcribe_wav_file(wav_path)
+                            # append transcript to input text
+                            st.session_state.compose_text = (st.session_state.compose_text + " " + t).strip()
+                            st.session_state.last_composer_audio_hash = h
+                            st.toast("Transcript added to the input.", icon="🎙️")
+                        except Exception as e:
+                            st.error(f"Transcription failed: {e}")
+                else:
+                    logger.debug("Duplicate composer audio hash detected; skipping re-save & re-transcribe")
+        except Exception as e:
+            logger.warning("Mic failed: %s", e)
+            st.caption("🎙️ unavailable")
+
+    # ---- Text input (no value= to avoid Streamlit warning)
+    with col_text:
+        st.text_input(
+            "Instruction",
+            key="compose_text",
+            label_visibility="collapsed",
+            placeholder="Describe what you want me to do…",
+        )
+
+    # ---- Send button
+    with col_send:
+        st.button("➤ Send", type="primary", use_container_width=True, on_click=_send_compose)
+
+# Consume any pending text (like st.chat_input would return)
+user_text = st.session_state.pop("__pending_user_text", "")
+
+# If the user clicked “Use this as my instruction”, feed it into the flow once
+if not user_text and st.session_state.pending_instruction:
+    user_text = st.session_state.pending_instruction
+    st.session_state.pending_instruction = ""  # consume it once
 
 if user_text:
     st.session_state.chat.append({"role": "user", "content": user_text})
@@ -435,7 +643,8 @@ if user_text:
     with st.chat_message("assistant"):
         st.markdown("**Step 1 — Building a standard prompt...**")
         try:
-            engineered = retry(lambda: build_engineered_prompt(user_text), retries=max_retries)
+            def _call(): return build_engineered_prompt(user_text)
+            engineered = retry(_call, retries=max_retries)
         except Exception as e:
             st.error(f"Prompt builder failed: {e}")
             logger.exception("Builder failed")
@@ -550,7 +759,7 @@ if st.session_state.run_requested:
             st.markdown(fixed_output)
 
         # Save artifact and offer downloads
-        to_save = critic_report or effective  # prefer critic content if present, else the main result
+        to_save = critic_report or effective
         try:
             out_path = save_text(to_save, prefix="final-output")
             st.download_button("💾 Download result (as text)", data=open(out_path, "rb").read(), file_name=os.path.basename(out_path))
@@ -558,7 +767,7 @@ if st.session_state.run_requested:
             logger.exception("Failed saving final output: %s", e)
             st.warning("Could not save result to disk.")
 
-        # NEW: detect and export any code blocks
+        # Detect & export code blocks
         offer_code_downloads(effective, base_name="script")
 
         # Record metadata & reset run flag
@@ -570,7 +779,6 @@ if st.session_state.run_requested:
             "conversation_mode": conversation_mode,
         }
 
-    # IMPORTANT: reset flag so we don't re-run forever
     st.session_state.run_requested = False
 
 # ================================================================
@@ -580,4 +788,6 @@ with st.expander("Diagnostics & Last Run", expanded=False):
     st.json(st.session_state.last_run_meta)
     st.caption(f"Logs: `{LOG_FILE}`")
 
-st.caption("Built with Streamlit + OpenAI API. Edit the model in the sidebar.")
+st.caption("Built with Streamlit + OpenAI API. Voice input powered by audio-recorder-streamlit + whisper-1.")
+# ================================================================
+# End of app.py
