@@ -28,11 +28,17 @@ OUTPUT_DIR = "outputs"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 LOG_FILE = os.path.join(OUTPUT_DIR, "app.log")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    handlers=[logging.FileHandler(LOG_FILE, encoding="utf-8"), logging.StreamHandler()],
-)
+
+# Configure logging only once to prevent multiple handlers/log entries
+# Check if root logger already has handlers to avoid duplicate configuration
+root_logger = logging.getLogger()
+if not root_logger.handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[logging.FileHandler(LOG_FILE, encoding="utf-8"), logging.StreamHandler()],
+    )
+
 logger = logging.getLogger("prompt_app")
 
 # ================================================================
