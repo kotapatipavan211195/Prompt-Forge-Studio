@@ -6,8 +6,8 @@
 
 ## Table of Contents
 - [What this app does](#what-this-app-does)
-- [feature-overview](#feature-overview)
-- [architecture-diagram](#architecture-diagram-conceptual)
+- [Feature overview](#feature-overview)
+- [Architecture diagram](#architecture-diagram-conceptual)
 - [Requirements](#requirements)
 - [1. Create an OpenAI account & API key](#1-create-an-openai-account--api-key)
 - [2. Choose how you want to provide your API key](#2-choose-how-you-want-to-provide-your-api-key)
@@ -18,8 +18,8 @@
 - [4. Install and run the app](#4-install-and-run-the-app)
 - [5. How to use the app](#5-how-to-use-the-app)
 - [Troubleshooting](#troubleshooting)
-- [prompt-lifecycle](#prompt-lifecycle)
-- [voice-input-&-audio-handling](#voice-input--audio-handling)
+- [Prompt lifecycle](#prompt-lifecycle)
+- [Voice input & audio handling](#voice-input--audio-handling)
 - [Security best practices](#security-best-practices)
 - [Common questions (FAQ)](#common-questions-faq)
 - [Repo layout](#repo-layout)
