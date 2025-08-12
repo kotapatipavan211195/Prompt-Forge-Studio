@@ -1,0 +1,1 @@
+- v2.0.0 Added audio dedupe, improved docs, deferred code file writes, JSON validation warnings, session state table.

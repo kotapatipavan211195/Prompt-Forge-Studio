@@ -6,6 +6,8 @@
 
 ## Table of Contents
 - [What this app does](#what-this-app-does)
+- [feature-overview](#feature-overview)
+- [architecture-diagram](#architecture-diagram-conceptual)
 - [Requirements](#requirements)
 - [1. Create an OpenAI account & API key](#1-create-an-openai-account--api-key)
 - [2. Choose how you want to provide your API key](#2-choose-how-you-want-to-provide-your-api-key)
@@ -16,6 +18,8 @@
 - [4. Install and run the app](#4-install-and-run-the-app)
 - [5. How to use the app](#5-how-to-use-the-app)
 - [Troubleshooting](#troubleshooting)
+- [prompt-lifecycle](#prompt-lifecycle)
+- [voice-input-&-audio-handling](#voice-input--audio-handling)
 - [Security best practices](#security-best-practices)
 - [Common questions (FAQ)](#common-questions-faq)
 - [Repo layout](#repo-layout)
@@ -30,6 +34,46 @@
 - **Critic/self-review** pass and **error-driven fix** mode (paste tracebacks/failing tests).
 - **Code export:** auto-detects fenced code blocks in results and offers per-file downloads and a ZIP.
 - **Logging & artifacts:** saves prompts/results/logs in `outputs/`.
+
+---
+
+## Feature Overview
+| Capability | Description | Key Functions (in `app.py`) |
+|------------|-------------|------------------------------|
+| Prompt Engineering Builder | Converts a short instruction into a structured, editable engineered prompt (Role, Task, Context, Inputs, Constraints, Steps, Examples, Output, Tone, Acceptance Criteria). | `build_engineered_prompt`, constants `PROMPT_BUILDER_SYSTEM` |
+| Execution Engine | Runs the engineered prompt (optionally with recent conversation context). | `execute_engineered_prompt`, `llm_once` |
+| Streaming Output | Real‑time token streaming via OpenAI Responses API with chat fallback. | `_call_via_responses`, `_call_via_chat` |
+| Conversation Mode | Injects last N messages into execution context. | `execute_engineered_prompt` |
+| Self‑Review (Critic) | Optional senior review of code/text with findings + improved version. | `run_code_self_review`, `CODE_CRITIC_SYSTEM` |
+| Error‑Driven Fix | Paste traceback / failing test output to get targeted correction. | `run_error_driven_fix`, `ERROR_FIXER_SYSTEM` |
+| Voice → Text Input | Record or upload audio; transcribe via Whisper. | Transcription UI block, `transcribe_wav_file` |
+| Audio Deduplication | Prevents saving the same recording multiple times per run (hash cache). | `save_audio_once`, session keys `saved_audio_hashes` |
+| Code Block Export | Detect fenced code blocks; offer per‑file & ZIP downloads. | `extract_code_blocks`, `offer_code_downloads` |
+| JSON Validation | Optional parsing + pretty print; warns if expected JSON fails. | `validate_json_output` |
+| Retry Logic | Exponential backoff for API calls. | `retry` |
+| Artifact Logging | Saves engineered prompts, outputs, logs to `outputs/`. | `save_text`, `save_bytes` |
+
+---
+
+## Architecture Diagram (Conceptual)
+```
+User Instruction / Audio
+        │
+        ▼
+  (Optional Transcription) ──> Engineered Prompt Builder
+        │                           │
+        │                           ▼
+        └────────────── Edit Prompt (textarea) ──▶ Execute ──▶ (Stream)
+                                                   │
+                                ┌──────────────────┴───────────────┐
+                                │ Critic Pass │ Error Fix (opt)    │
+                                └──────────────────┬───────────────┘
+                                                   ▼
+                                           Result + Code Export
+                                                   │
+                                                   ▼
+                                             Saved Artifacts
+```
 
 ---
 
@@ -154,6 +198,41 @@ streamlit run app.py
 
 ---
 
+## Prompt Lifecycle
+1. User supplies short instruction (text or transcribed audio).
+2. Builder produces a full engineered prompt (non‑streaming for determinism).
+3. User edits the prompt in a text area.
+4. Execute step runs with optional conversation context.
+5. Optional: Critic pass → Error fix pass → JSON prettification.
+6. Code blocks detected → download buttons / ZIP.
+7. Artifacts saved (prompt, final output, logs).
+
+---
+
+## Voice Input & Audio Handling
+- Primary recorder: `audio_recorder_streamlit` (fast, simple button UI)
+- Fallback recorder: `streamlit-mic-recorder`
+- File upload fallback (wav, m4a, mp3)
+- Transcription model: `whisper-1`
+- Deduplication: `save_audio_once` hashes raw bytes (SHA256 prefix) and caches path in `st.session_state.saved_audio_hashes` to avoid triple saves on reruns.
+- Composer mic also tracks last hash (`last_composer_audio_hash`) to avoid repeated re‑transcription of identical audio.
+
+---
+
+## Key Session State Keys
+| Key | Purpose |
+|-----|---------|
+| `chat` | Conversation history list of role/content dicts |
+| `engineered_prompt` | Current editable engineered prompt |
+| `run_requested` | Flag to trigger execution section |
+| `voice_transcript` | Last transcribed audio text |
+| `pending_instruction` | Voice transcript queued as next instruction |
+| `saved_audio_hashes` | Map of audio hash → saved file path |
+| `last_composer_audio_hash` | Hash of last composer mic audio to avoid duplicates |
+| `last_run_meta` | Metadata summary of last run |
+
+---
+
 ## Troubleshooting
 
 **Missing OPENAI_API_KEY**
@@ -174,6 +253,13 @@ streamlit run app.py
 
 **Proxy issues**
   - Configure network/proxy properly.
+
+| Symptom | Diagnostic Steps |
+|---------|------------------|
+| Silent failure after Send | Check `app.log`; verify builder didn't error; ensure model string valid |
+| Repeated partial streams | Network flakiness; disable streaming to confirm baseline |
+| Corrupted audio transcript | Verify file type; try re‑record; inspect hash reuse (logs) |
+| JSON still malformed | Strengthen Output section; instruct model to finish with closing brace only |
 
 ---
 
@@ -218,6 +304,13 @@ Prompt-Forge-Studio/
 ├── README.md               # Project documentation
 ├── LICENSE
 ```
+
+---
+
+## Changelog
+- v2.0.0 Added audio dedupe, improved docs, deferred code file writes, JSON validation warnings, session state table.
+
+---
 
 ## License
 

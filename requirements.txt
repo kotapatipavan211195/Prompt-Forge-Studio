@@ -2,6 +2,9 @@
 streamlit>=1.35,<2
 openai>=1.40.0
 python-dotenv>=1.0.1
+# Audio
+audio-recorder-streamlit>=0.1.0
+streamlit-mic-recorder>=0.1.0
 
 # Optional (if you plan to add extras later)
 # pydantic>=2.7
