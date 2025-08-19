@@ -1,6 +1,26 @@
 # Prompt Forge Studio (Streamlit)
 
-**Build → Edit → Run** LLM prompts with best-practice prompt engineering, optional self-review, error-driven fixes, and automatic **code export**.
+Prompt Forge Studio is a Streamlit-powered open source application that transforms short user instructions into structured, engineered prompts. By applying a multi part prompt framework, it ensures Large Language Models (LLMs) generate reliable, accurate, and reproducible results.
+
+**Prompt Standards Enforced**
+Prompt Forge Studio enforces 10 structured standards to maximize reliability:
+1. **ROLE** → Define expert persona & tooling context (if any).
+2. **TASK** → Restate the goal precisely and unambiguously.
+3. **CONTEXT** → Provide background, glossary, assumptions.
+4. **INPUTS** → Enumerate given inputs; list missing inputs & assumptions.
+5. **CONSTRAINTS** → Scope, style, time/tokens, do/don’t rules, guardrails.
+6. **STEPS** → Ordered, reproducible plan to complete the task.
+7. **EXAMPLES** → 1-2 minimal examples of expected behavior (if enabled).
+8. **OUTPUT** → Exact expected structure/format; schema if JSON.
+9. **TONE/STYLE** → Desired tone, reading level, formatting style.
+10. **QUALITY BAR** → Acceptance criteria or self checks.
+
+ **Usage**
+ 1. Enter a short instruction (e.g., “Summarize Q2 sales performance”).
+ 2. The app generates a standardized engineered prompt using the 10 part framework.
+ 3. Edit or refine the prompt if needed.
+ 4. Submit and view the LLM-generated response.
+ 5. Continue refining with conversation context enabled.
 
 ---
 
